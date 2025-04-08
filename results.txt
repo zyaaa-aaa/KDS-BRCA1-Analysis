@@ -1,0 +1,30 @@
+{
+    "sample_id": "Sample_Patient_123",
+    "sample_length": 7088,
+    "reference_id": "NM_007294.4",
+    "alignment_score": 7084,
+    "variants": [
+        {
+            "position": 441,
+            "reference": "A",
+            "variant": "T",
+            "type": "SNP",
+            "notation": "c.441A>T",
+            "clinvar_id": "3645516",
+            "clinical_significance": "Unknown",
+            "review_status": "N/A"
+        },
+        {
+            "position": 7088,
+            "reference": "A",
+            "variant": "C",
+            "type": "SNP",
+            "notation": "c.7088A>C",
+            "clinvar_id": "Not found",
+            "clinical_significance": "Unknown",
+            "review_status": "N/A"
+        }
+    ],
+    "processing_time": 0.006342172622680664,
+    "timestamp": "2025-04-08 17:41:13"
+}
