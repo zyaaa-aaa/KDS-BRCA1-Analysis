@@ -46,7 +46,7 @@ or for setting up with localhost with these steps
 1. **Clone the repository:**
 ```bash
 git clone <repository-url>
-cd brca1-analyzer
+cd KDS-BRCA1-ANALYSIS
 ```
 
 2. **. Setup the environments**
@@ -61,7 +61,7 @@ chmod +x run_app.sh
 
 **For Windows:**
 ```cmd
-run_app.bat
+./run_app.bat
 ```
 
 #### Option 2: Manual Installation
