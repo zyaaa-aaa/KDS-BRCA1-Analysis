@@ -2,6 +2,9 @@ from typing import Optional
 from dataclasses import dataclass
 import requests
 import streamlit as st
+import xml.etree.ElementTree as ET
+import json
+import time
 
 @dataclass
 class VariantInfo:
@@ -13,6 +16,8 @@ class VariantInfo:
     clinical_significance: str
     clinvar_id: str
     description: str
+    review_status: str = ""
+    condition: str = ""
 
 class ClinVarIntegrator:
     """Integration with ClinVar database for variant classification"""
@@ -20,97 +25,289 @@ class ClinVarIntegrator:
     def __init__(self):
         self.base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
         self.clinvar_cache = {}
+        self.api_key = None  # Add your NCBI API key here for higher rate limits
     
     def search_variant(self, gene_name: str, variant: str) -> Optional[VariantInfo]:
         """
-        Search for variant information in ClinVar
+        Search for variant information in ClinVar using real API calls
         """
+        cache_key = f"{gene_name}_{variant}"
+        if cache_key in self.clinvar_cache:
+            return self.clinvar_cache[cache_key]
+        
         try:
-            # Search in ClinVar using E-utilities
-            search_term = f"{gene_name}[gene] AND {variant}[variant name]"
-            search_url = f"{self.base_url}esearch.fcgi"
-            search_params = {
-                'db': 'clinvar',
-                'term': search_term,
-                'retmode': 'json',
-                'retmax': '1'
-            }
+            # First, search for the variant
+            clinvar_ids = self._search_clinvar(gene_name, variant)
             
-            response = requests.get(search_url, params=search_params)
-            if response.status_code == 200:
-                data = response.json()
-                if 'esearchresult' in data and data['esearchresult']['idlist']:
-                    clinvar_id = data['esearchresult']['idlist'][0]
-                    return self._fetch_variant_details(clinvar_id)
+            if not clinvar_ids:
+                st.warning(f"No ClinVar entries found for {gene_name} {variant}")
+                return None
             
-            # Return mock data for demonstration
-            return self._get_mock_variant_info(variant)
+            # Fetch details for the first result
+            variant_info = self._fetch_variant_details(clinvar_ids[0])
+            
+            if variant_info:
+                self.clinvar_cache[cache_key] = variant_info
+            
+            return variant_info
             
         except Exception as e:
-            st.warning(f"ClinVar lookup failed: {e}")
-            return self._get_mock_variant_info(variant)
+            st.error(f"ClinVar lookup failed: {str(e)}")
+            return None
     
-    def _fetch_variant_details(self, clinvar_id: str) -> VariantInfo:
+    def _search_clinvar(self, gene_name: str, variant: str) -> list:
+        """
+        Search ClinVar database for variant IDs
+        """
+        # Try different search strategies
+        search_terms = [
+            f"{gene_name}[gene] AND {variant}[variant name]",
+            f"{gene_name} AND {variant}",
+            f'"{gene_name}" AND "{variant}"'
+        ]
+        
+        for search_term in search_terms:
+            try:
+                search_url = f"{self.base_url}esearch.fcgi"
+                params = {
+                    'db': 'clinvar',
+                    'term': search_term,
+                    'retmode': 'json',
+                    'retmax': '10',
+                    'sort': 'relevance'
+                }
+                
+                if self.api_key:
+                    params['api_key'] = self.api_key
+                
+                response = requests.get(search_url, params=params, timeout=10)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                if 'esearchresult' in data and data['esearchresult']['idlist']:
+                    return data['esearchresult']['idlist']
+                
+                # Add delay to respect rate limits
+                time.sleep(0.34)  # ~3 requests per second
+                
+            except requests.exceptions.RequestException as e:
+                st.warning(f"Search attempt failed for term '{search_term}': {e}")
+                continue
+        
+        return []
+    
+    def _fetch_variant_details(self, clinvar_id: str) -> Optional[VariantInfo]:
         """
         Fetch detailed variant information from ClinVar
         """
         try:
+            # Fetch variant details using efetch
             fetch_url = f"{self.base_url}efetch.fcgi"
-            fetch_params = {
+            params = {
                 'db': 'clinvar',
                 'id': clinvar_id,
-                'rettype': 'vcv',
+                'rettype': 'variationid',
+                'retmode': 'xml'
+            }
+            
+            if self.api_key:
+                params['api_key'] = self.api_key
+            
+            response = requests.get(fetch_url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            # Parse XML response
+            variant_info = self._parse_clinvar_xml(response.text, clinvar_id)
+            
+            if variant_info:
+                return variant_info
+            
+            # If XML parsing fails, try JSON approach
+            return self._fetch_variant_summary(clinvar_id)
+            
+        except Exception as e:
+            st.warning(f"Failed to fetch details for ClinVar ID {clinvar_id}: {e}")
+            return None
+    
+    def _parse_clinvar_xml(self, xml_content: str, clinvar_id: str) -> Optional[VariantInfo]:
+        """
+        Parse XML response from ClinVar efetch
+        """
+        try:
+            root = ET.fromstring(xml_content)
+            
+            # Extract basic variant information
+            variant_name = "Unknown"
+            clinical_significance = "Unknown"
+            description = ""
+            review_status = ""
+            condition = ""
+            position = 0
+            ref_allele = ""
+            alt_allele = ""
+            
+            # Navigate through XML structure
+            for clinvar_set in root.findall('.//ClinVarSet'):
+                # Get variant name
+                for name_elem in clinvar_set.findall('.//Name'):
+                    if name_elem.text:
+                        variant_name = name_elem.text
+                        break
+                
+                # Get clinical significance
+                for sig_elem in clinvar_set.findall('.//ClinicalSignificance/Description'):
+                    if sig_elem.text:
+                        clinical_significance = sig_elem.text
+                        break
+                
+                # Get review status
+                for review_elem in clinvar_set.findall('.//ClinicalSignificance/ReviewStatus'):
+                    if review_elem.text:
+                        review_status = review_elem.text
+                        break
+                
+                # Get condition
+                for trait_elem in clinvar_set.findall('.//TraitSet/Trait/Name/ElementValue'):
+                    if trait_elem.text:
+                        condition = trait_elem.text
+                        break
+                
+                # Get sequence location info
+                for seq_loc in clinvar_set.findall('.//SequenceLocation'):
+                    start = seq_loc.get('start')
+                    if start:
+                        try:
+                            position = int(start)
+                        except ValueError:
+                            pass
+                    
+                    ref = seq_loc.get('referenceAllele')
+                    alt = seq_loc.get('alternateAllele')
+                    if ref:
+                        ref_allele = ref
+                    if alt:
+                        alt_allele = alt
+                
+                break  # Use first ClinVarSet
+            
+            return VariantInfo(
+                position=position,
+                ref_allele=ref_allele,
+                alt_allele=alt_allele,
+                variant_name=variant_name,
+                clinical_significance=clinical_significance,
+                clinvar_id=clinvar_id,
+                description=f"{clinical_significance} variant" + (f" associated with {condition}" if condition else ""),
+                review_status=review_status,
+                condition=condition
+            )
+            
+        except ET.ParseError as e:
+            st.warning(f"XML parsing error: {e}")
+            return None
+        except Exception as e:
+            st.warning(f"Error parsing ClinVar XML: {e}")
+            return None
+    
+    def _fetch_variant_summary(self, clinvar_id: str) -> Optional[VariantInfo]:
+        """
+        Fetch variant summary using esummary as fallback
+        """
+        try:
+            summary_url = f"{self.base_url}esummary.fcgi"
+            params = {
+                'db': 'clinvar',
+                'id': clinvar_id,
                 'retmode': 'json'
             }
             
-            response = requests.get(fetch_url, params=fetch_params)
-            if response.status_code == 200:
-                # Parse ClinVar response (simplified)
+            if self.api_key:
+                params['api_key'] = self.api_key
+            
+            response = requests.get(summary_url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if 'result' in data and clinvar_id in data['result']:
+                result = data['result'][clinvar_id]
+                
                 return VariantInfo(
                     position=0,
-                    ref_allele="A",
-                    alt_allele="C",
-                    variant_name="c.185A>C",
-                    clinical_significance="Pathogenic",
+                    ref_allele="",
+                    alt_allele="",
+                    variant_name=result.get('title', 'Unknown variant'),
+                    clinical_significance=result.get('clinical_significance', 'Unknown'),
                     clinvar_id=clinvar_id,
-                    description="Pathogenic variant in BRCA1"
+                    description=result.get('summary', 'No description available'),
+                    review_status=result.get('review_status', ''),
+                    condition=result.get('condition', '')
                 )
-        except:
-            pass
-        
-        return self._get_mock_variant_info("unknown")
+            
+            return None
+            
+        except Exception as e:
+            st.warning(f"Failed to fetch summary for ClinVar ID {clinvar_id}: {e}")
+            return None
     
-    def _get_mock_variant_info(self, variant: str) -> VariantInfo:
+    def search_multiple_variants(self, gene_name: str, variants: list) -> dict:
         """
-        Return mock variant information for demonstration
+        Search for multiple variants efficiently
         """
-        mock_variants = {
-            "c.185A>C": VariantInfo(
-                position=185,
-                ref_allele="A",
-                alt_allele="C",
-                variant_name="c.185A>C (p.Gln62Pro)",
-                clinical_significance="Pathogenic",
-                clinvar_id="SCV000012345",
-                description="Pathogenic missense variant"
-            ),
-            "c.68_69delAG": VariantInfo(
-                position=68,
-                ref_allele="AG",
-                alt_allele="-",
-                variant_name="c.68_69delAG",
-                clinical_significance="Pathogenic",
-                clinvar_id="SCV000054321",
-                description="Pathogenic frameshift variant"
-            )
-        }
+        results = {}
         
-        return mock_variants.get(variant, VariantInfo(
-            position=0,
-            ref_allele="N",
-            alt_allele="N",
-            variant_name="Unknown variant",
-            clinical_significance="Uncertain significance",
-            clinvar_id="Unknown",
-            description="Variant of uncertain significance"
-        ))
+        for variant in variants:
+            try:
+                result = self.search_variant(gene_name, variant)
+                results[variant] = result
+                
+                # Add delay between requests to respect rate limits
+                time.sleep(0.34)
+                
+            except Exception as e:
+                st.warning(f"Failed to search variant {variant}: {e}")
+                results[variant] = None
+        
+        return results
+    
+    def get_gene_variants(self, gene_name: str, max_results: int = 50) -> list:
+        """
+        Get all variants for a specific gene
+        """
+        try:
+            search_url = f"{self.base_url}esearch.fcgi"
+            params = {
+                'db': 'clinvar',
+                'term': f"{gene_name}[gene]",
+                'retmode': 'json',
+                'retmax': str(max_results),
+                'sort': 'relevance'
+            }
+            
+            if self.api_key:
+                params['api_key'] = self.api_key
+            
+            response = requests.get(search_url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if 'esearchresult' in data and data['esearchresult']['idlist']:
+                clinvar_ids = data['esearchresult']['idlist']
+                
+                variants = []
+                for clinvar_id in clinvar_ids[:10]:  # Limit to first 10 for performance
+                    variant_info = self._fetch_variant_details(clinvar_id)
+                    if variant_info:
+                        variants.append(variant_info)
+                    
+                    time.sleep(0.34)  # Rate limiting
+                
+                return variants
+            
+            return []
+            
+        except Exception as e:
+            st.error(f"Failed to get variants for gene {gene_name}: {e}")
+            return []
