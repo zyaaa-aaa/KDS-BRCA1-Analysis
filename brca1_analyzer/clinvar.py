@@ -101,13 +101,14 @@ class ClinVarIntegrator:
         """
         Fetch detailed variant information from ClinVar
         """
+
         try:
             # Fetch variant details using efetch
             fetch_url = f"{self.base_url}efetch.fcgi"
             params = {
                 'db': 'clinvar',
                 'id': clinvar_id,
-                'rettype': 'variationid',
+                'rettype': 'clinvarset',
                 'retmode': 'xml'
             }
             
@@ -116,6 +117,9 @@ class ClinVarIntegrator:
             
             response = requests.get(fetch_url, params=params, timeout=10)
             response.raise_for_status()
+
+            with open(f"clinvar_raw_{clinvar_id}.xml", "w", encoding="utf-8") as f:
+                f.write(response.text)
             
             # Parse XML response
             variant_info = self._parse_clinvar_xml(response.text, clinvar_id)
@@ -132,12 +136,12 @@ class ClinVarIntegrator:
     
     def _parse_clinvar_xml(self, xml_content: str, clinvar_id: str) -> Optional[VariantInfo]:
         """
-        Parse XML response from ClinVar efetch
+        Parse XML response from ClinVar efetch - updated for actual ClinVar XML structure
         """
         try:
             root = ET.fromstring(xml_content)
             
-            # Extract basic variant information
+            # Initialize variables
             variant_name = "Unknown"
             clinical_significance = "Unknown"
             description = ""
@@ -147,34 +151,57 @@ class ClinVarIntegrator:
             ref_allele = ""
             alt_allele = ""
             
-            # Navigate through XML structure
+            # Navigate through ClinVarSet structure
             for clinvar_set in root.findall('.//ClinVarSet'):
-                # Get variant name
-                for name_elem in clinvar_set.findall('.//Name'):
+                
+                # Get variant name from preferred name in MeasureSet
+                for name_elem in clinvar_set.findall('.//MeasureSet/Measure/Name/ElementValue[@Type="preferred name"]'):
                     if name_elem.text:
-                        variant_name = name_elem.text
+                        variant_name = name_elem.text.strip()
                         break
                 
-                # Get clinical significance
-                for sig_elem in clinvar_set.findall('.//ClinicalSignificance/Description'):
+                # Fallback: get variant name from any Name/ElementValue
+                if variant_name == "Unknown":
+                    for name_elem in clinvar_set.findall('.//MeasureSet/Measure/Name/ElementValue'):
+                        if name_elem.text:
+                            variant_name = name_elem.text.strip()
+                            break
+                
+                # Get clinical significance from GermlineClassification Description
+                for sig_elem in clinvar_set.findall('.//GermlineClassification/Description'):
                     if sig_elem.text:
-                        clinical_significance = sig_elem.text
+                        clinical_significance = sig_elem.text.strip()
                         break
+                
+                # Fallback: get clinical significance from simple GermlineClassification tag
+                if clinical_significance == "Unknown":
+                    for sig_elem in clinvar_set.findall('.//GermlineClassification'):
+                        if sig_elem.text and sig_elem.text.strip():
+                            clinical_significance = sig_elem.text.strip()
+                            break
                 
                 # Get review status
-                for review_elem in clinvar_set.findall('.//ClinicalSignificance/ReviewStatus'):
+                for review_elem in clinvar_set.findall('.//ReviewStatus'):
                     if review_elem.text:
-                        review_status = review_elem.text
+                        review_status = review_elem.text.strip()
                         break
                 
-                # Get condition
-                for trait_elem in clinvar_set.findall('.//TraitSet/Trait/Name/ElementValue'):
+                # Get condition from TraitSet
+                for trait_elem in clinvar_set.findall('.//TraitSet/Trait/Name/ElementValue[@Type="Preferred"]'):
                     if trait_elem.text:
-                        condition = trait_elem.text
+                        condition = trait_elem.text.strip()
                         break
+                
+                # Fallback: get any condition name
+                if not condition:
+                    for trait_elem in clinvar_set.findall('.//TraitSet/Trait/Name/ElementValue'):
+                        if trait_elem.text:
+                            condition = trait_elem.text.strip()
+                            break
                 
                 # Get sequence location info
                 for seq_loc in clinvar_set.findall('.//SequenceLocation'):
+                    # Try to get position
                     start = seq_loc.get('start')
                     if start:
                         try:
@@ -182,6 +209,7 @@ class ClinVarIntegrator:
                         except ValueError:
                             pass
                     
+                    # Get alleles if available
                     ref = seq_loc.get('referenceAllele')
                     alt = seq_loc.get('alternateAllele')
                     if ref:
@@ -189,7 +217,28 @@ class ClinVarIntegrator:
                     if alt:
                         alt_allele = alt
                 
+                # Get additional description from ObservedData
+                for desc_elem in clinvar_set.findall('.//ObservedData/Attribute[@Type="Description"]'):
+                    if desc_elem.text and len(desc_elem.text.strip()) > len(description):
+                        description = desc_elem.text.strip()
+                
                 break  # Use first ClinVarSet
+            
+            # Build final description if not found in ObservedData
+            if not description:
+                desc_parts = []
+                if clinical_significance != "Unknown":
+                    desc_parts.append(f"{clinical_significance} variant")
+                if condition:
+                    desc_parts.append(f"associated with {condition}")
+                if review_status:
+                    desc_parts.append(f"(Review status: {review_status})")
+                
+                description = " ".join(desc_parts) if desc_parts else "Variant found in ClinVar"
+            
+            # Clean up clinical significance - capitalize first letter
+            if clinical_significance != "Unknown":
+                clinical_significance = clinical_significance.capitalize()
             
             return VariantInfo(
                 position=position,
@@ -198,7 +247,7 @@ class ClinVarIntegrator:
                 variant_name=variant_name,
                 clinical_significance=clinical_significance,
                 clinvar_id=clinvar_id,
-                description=f"{clinical_significance} variant" + (f" associated with {condition}" if condition else ""),
+                description=description,
                 review_status=review_status,
                 condition=condition
             )

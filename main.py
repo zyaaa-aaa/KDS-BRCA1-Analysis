@@ -51,7 +51,7 @@ def create_streamlit_app():
             with st.spinner("Initializing BRCA1 Analyzer..."):
                 # Initialize with email (required by NCBI)
                 st.session_state.analyzer = BRCA1Analyzer(
-                    email="shazyaaudrea@gmail.com",  # Replace with actual email
+                    email="abc@gmail.com",  # Replace with actual email
                     api_key=None  # Add NCBI API key if available
                 )
                 
@@ -819,7 +819,6 @@ def create_streamlit_app():
         <p>🧬 <strong>BRCA1 Sequence Analyzer v1.0</strong></p>
         <p>Powered by NCBI GenBank and ClinVar databases</p>
         <p><small>For research and educational purposes only • Not for clinical diagnosis</small></p>
-        <p><small>Questions or issues? Contact: shazyaaudrea@gmail.com</small></p>
     </div>
     """, unsafe_allow_html=True)
 
